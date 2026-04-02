@@ -1,0 +1,82 @@
+# .github/workflows/backup.yml
+# Provides two capabilities:
+#   1. Manual trigger (workflow_dispatch) -- verify repo health from GitHub UI
+#   2. Weekly schedule -- warn if no backup has been pushed in 7 days
+
+name: Backup Status
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why are you running this check?"
+        required: false
+        default: "manual verification"
+
+  schedule:
+    # Every Monday at 09:00 UTC
+    - cron: "0 9 * * 1"
+
+jobs:
+  check-backup-freshness:
+    name: Check backup freshness
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history needed to inspect commit dates
+
+      - name: Check last commit age
+        id: age_check
+        run: |
+          LAST_COMMIT_EPOCH=$(git log -1 --format="%ct")
+          NOW_EPOCH=$(date +%s)
+          AGE_SECONDS=$(( NOW_EPOCH - LAST_COMMIT_EPOCH ))
+          AGE_DAYS=$(( AGE_SECONDS / 86400 ))
+
+          LAST_COMMIT_DATE=$(git log -1 --format="%ci")
+          LAST_COMMIT_MSG=$(git log -1 --format="%s")
+
+          echo "last_commit_date=$LAST_COMMIT_DATE" >> "$GITHUB_OUTPUT"
+          echo "last_commit_msg=$LAST_COMMIT_MSG"   >> "$GITHUB_OUTPUT"
+          echo "age_days=$AGE_DAYS"                 >> "$GITHUB_OUTPUT"
+
+          echo "Last commit : $LAST_COMMIT_DATE"
+          echo "Message     : $LAST_COMMIT_MSG"
+          echo "Age         : ${AGE_DAYS} day(s)"
+
+          if [ "$AGE_DAYS" -gt 7 ]; then
+            echo "WARN: Last backup is ${AGE_DAYS} days old (threshold: 7 days)"
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "OK: Backup is fresh (${AGE_DAYS} days old)"
+            echo "stale=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Report status (manual trigger)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          echo "## Backup Health Report" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Last backup date | ${{ steps.age_check.outputs.last_commit_date }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Last commit message | \`${{ steps.age_check.outputs.last_commit_msg }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Age | ${{ steps.age_check.outputs.age_days }} day(s) |" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ steps.age_check.outputs.stale }}" = "true" ]; then
+            echo "| Status | STALE - run backup-now.ps1 |" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "| Status | Fresh |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Fail if backup is stale (scheduled run only)
+        if: github.event_name == 'schedule' && steps.age_check.outputs.stale == 'true'
+        run: |
+          echo "ERROR: No backup received in the last 7 days."
+          echo "Last backup was ${{ steps.age_check.outputs.age_days }} day(s) ago."
+          echo "Run backup-now.ps1 on your Windows machine."
+          exit 1
